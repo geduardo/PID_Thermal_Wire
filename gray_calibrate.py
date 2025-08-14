@@ -38,37 +38,51 @@ def build_intensity_to_temp_lut(colorbar_bgr: np.ndarray,
     L = line.shape[0]
     pos = np.linspace(0.0, 1.0, L, dtype=np.float32)  # 0=start (top or left), 1=end
 
-    # Map intensity(0..255) -> position(0..1) via nearest neighbor on measured line
     # Ensure intensities are within [0,255]
     intensities = np.clip(line, 0, 255)
-
-    lut_pos = np.zeros(256, dtype=np.float32)
-    # For speed, build an index from rounded measured intensity to best position
-    # Multiple measured samples may share the same rounded intensity; take the median pos
-    idxs = [[] for _ in range(256)]
-    for i, val in enumerate(intensities):
-        r = int(round(val))
-        r = 0 if r < 0 else (255 if r > 255 else r)
-        idxs[r].append(pos[i])
-    # Fill positions where we saw that intensity; others interpolate later
-    for k in range(256):
-        if idxs[k]:
-            lut_pos[k] = float(np.median(idxs[k]))
-        else:
-            lut_pos[k] = np.nan
-
-    # Interpolate missing positions (monotone fill)
-    valid = np.where(~np.isnan(lut_pos))[0]
-    if len(valid) < 2:
-        raise RuntimeError("Not enough gradient variation detected in colorbar ROI to build LUT.")
-    lut_pos = np.interp(np.arange(256), valid, lut_pos[valid])
-
+    
+    # Check if we have a reasonable gradient
+    intensity_range = np.max(intensities) - np.min(intensities)
+    if intensity_range < 30:  # Less than 30 gray levels of variation
+        raise RuntimeError(f"Insufficient gradient in colorbar ROI (range: {intensity_range:.1f}). "
+                         "Ensure you selected a clean colorbar with good contrast.")
+    
+    print(f"Colorbar analysis: intensity range {np.min(intensities):.1f} to {np.max(intensities):.1f}")
+    
+    # Sort by intensity to enforce monotonicity
+    # This creates a strictly monotonic mapping: lower intensity -> one end, higher -> other end
+    sort_idx = np.argsort(intensities)
+    sorted_intensities = intensities[sort_idx]
+    sorted_positions = pos[sort_idx]
+    
+    # Remove duplicate intensities (keep the median position for each intensity)
+    unique_intensities = []
+    unique_positions = []
+    i = 0
+    while i < len(sorted_intensities):
+        intensity = sorted_intensities[i]
+        # Find all positions with this intensity
+        j = i
+        while j < len(sorted_intensities) and sorted_intensities[j] == intensity:
+            j += 1
+        # Take median position for this intensity
+        median_pos = np.median(sorted_positions[i:j])
+        unique_intensities.append(intensity)
+        unique_positions.append(median_pos)
+        i = j
+    
+    unique_intensities = np.array(unique_intensities)
+    unique_positions = np.array(unique_positions)
+    
+    # Interpolate to get position for every possible grayscale value [0,255]
+    lut_pos = np.interp(np.arange(256), unique_intensities, unique_positions)
+    
     # Convert position -> temperature
     if hot_at_start:
-        # pos=0 is hot end
+        # pos=0 is hot end, pos=1 is cold end
         temps = T_max - lut_pos * (T_max - T_min)
     else:
-        # pos=0 is cold end
+        # pos=0 is cold end, pos=1 is hot end  
         temps = T_min + lut_pos * (T_max - T_min)
 
     return temps.astype(np.float32)  # index by grayscale value 0..255
@@ -126,6 +140,21 @@ def main():
             f.write(f"{i},{t:.6f}\n")
 
     print(f"Saved calibration: {path_npz}\nAlso wrote CSV preview: {path_csv}")
+    
+    # Validation: check monotonicity
+    diffs = np.diff(lut)
+    if hot_at_start:
+        # Should be decreasing (hot to cold)
+        bad_count = np.sum(diffs > 0)
+        direction = "decreasing (hot→cold)"
+    else:
+        # Should be increasing (cold to hot)  
+        bad_count = np.sum(diffs < 0)
+        direction = "increasing (cold→hot)"
+    
+    print(f"LUT validation: should be {direction}, found {bad_count} violations out of 255 steps")
+    if bad_count > 20:
+        print("WARNING: LUT is not monotonic! Check your colorbar ROI selection.")
 
 
 if __name__ == "__main__":
