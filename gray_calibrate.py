@@ -26,7 +26,7 @@ def _average_along_thin_axis(img_bgr: np.ndarray, vertical: bool) -> np.ndarray:
     gray = cv2.cvtColor(line.astype(np.uint8)[None, :, :], cv2.COLOR_BGR2GRAY)[0]
     # smooth a bit to reduce dithering/noise
     gray = cv2.GaussianBlur(gray, (5, 1) if vertical else (1, 5), 0)
-    return gray.astype(np.float32)
+    return gray.astype(np.float32).squeeze()
 
 
 def build_intensity_to_temp_lut(colorbar_bgr: np.ndarray,

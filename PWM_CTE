@@ -8,7 +8,7 @@ from datetime import datetime
 
 INTERVAL   = 0.01     # main loop pacing for UI/plot
 PORT       = "COM3"
-PWM0       = 0       # initial PWM (0..255)
+PWM0       = 50 #%       # initial PWM (0..255)
 THRESHOLD_C = 300.0   # °C threshold
 
 # Background OCR pacing (independent from UI loop)
@@ -70,7 +70,7 @@ def main():
     # --- PWM control via TextBox ---
     pwm = clamp_uint8(PWM0)
     axbox = plt.axes([0.30, 0.05, 0.15, 0.07])
-    textbox = TextBox(axbox, "PWM (0-255)", initial=str(pwm))
+    textbox = TextBox(axbox, "PWM (0-100%)", initial=str(pwm))
     def submit(text):
         nonlocal pwm
         try:
