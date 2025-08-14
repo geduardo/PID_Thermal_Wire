@@ -36,16 +36,16 @@ def plot_file(path):
         return
 
     fig, ax1 = plt.subplots()
-    ax1.plot(t, temp, 'b-', label='Temp (°C)')
+    ax1.plot(t, temp, 'b-', marker='o', label='Temp (°C)')
     if any(x == x for x in sp):  # any non-NaN
-        ax1.plot(t, sp, 'r--', label='Setpoint (°C)')
+        ax1.plot(t, sp, 'r--', marker='x', label='Setpoint (°C)')
     ax1.set_xlabel('Time (s)')
     ax1.set_ylabel('°C')
     ax1.legend(loc='upper left')
 
     if any(x == x for x in pwm):
         ax2 = ax1.twinx()
-        ax2.plot(t, pwm, 'g:', label='PWM (0-255)')
+        ax2.plot(t, pwm, 'g:', marker='s', label='PWM (0-255)')
         ax2.set_ylabel('PWM')
         ax2.set_ylim(0, 255)
         ax2.legend(loc='upper right')
@@ -60,5 +60,3 @@ if __name__ == '__main__':
         print('Usage: python plot_csv.py path/to/log.csv')
         sys.exit(1)
     plot_file(sys.argv[1])
-
-
