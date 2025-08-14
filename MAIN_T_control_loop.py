@@ -1,7 +1,8 @@
-import time, serial, matplotlib.pyplot as plt, numpy as np
+import time, serial, matplotlib.pyplot as plt, numpy as np, csv, os
 from collections import deque
 from matplotlib.widgets import TextBox
 from read_temp import select_roi, read_temperature_from_roi
+from datetime import datetime
 
 INTERVAL  = 0.01   # s
 PORT      = "COM3"
@@ -53,6 +54,18 @@ def main():
 
     pid = PID(kp,ki,kd, SETPOINT0)
 
+    # --- CSV logging setup ---
+    logs_dir = os.path.join(os.path.dirname(__file__), "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_path = os.path.join(
+        logs_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_MAIN_T_control_loop.csv"
+    )
+    csv_file = open(log_path, "w", newline="", encoding="utf-8")
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(["time_s", "temp_c", "setpoint_c", "pwm", "error_c"])
+    tlog0 = time.time()
+    _last_flush = time.time()
+
     # --- Arduino ---
     ser = serial.Serial(PORT, 9600, timeout=1); time.sleep(2)
     outlier = OutlierFilter(max_delta=70)
@@ -99,6 +112,13 @@ def main():
                 print(f"\rT={tf:6.2f} °C | e={err:6.2f} °C | PWM={pwm:3d} ({pwm/2.55:3.0f}%)", end="")
                 temps.append(tf); t_axis.append(t)
                 ls.set_data(t_axis, [pid.setpoint]*len(t_axis))
+                # log control loop sample (filtered temp)
+                t_el = time.time() - tlog0
+                csv_writer.writerow([
+                    f"{t_el:.4f}", f"{tf:.4f}", f"{pid.setpoint:.2f}", pwm, f"{err:.4f}"
+                ])
+                if time.time() - _last_flush >= 1.0:
+                    csv_file.flush(); _last_flush = time.time()
             else:
                 print("\rT=  --.- °C (??)", end="")
 
@@ -115,6 +135,11 @@ def main():
         print("\nInterrumpted.")
     finally:
         ser.write(bytes([0])); print("\nPWM = 0%"); ser.close()
+        try:
+            csv_file.flush(); csv_file.close()
+            print(f"Saved CSV: {log_path}")
+        except Exception:
+            pass
         plt.ioff(); plt.show()
 
 if __name__ == "__main__":
