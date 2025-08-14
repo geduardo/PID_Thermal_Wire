@@ -4,10 +4,11 @@ from matplotlib.widgets import TextBox
 from read_temp import select_roi, read_temperature_from_roi
 from datetime import datetime
 
-INTERVAL  = 0.01   # s
+INTERVAL  = 0.033   # s
 PORT      = "COM3"
 SETPOINT0 = 200.0   # ºC 
 
+#x=1443, y=138, w=363, h=286
 # ---------------- FILTER ------------------
 class OutlierFilter:
     def __init__(self, max_delta=80):
