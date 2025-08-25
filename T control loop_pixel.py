@@ -20,9 +20,9 @@ from read_temp2 import select_roi, read_temperature_from_roi
 
 # ---------------- CONFIG ----------------
 PORT          = "COM3"
-SETPOINT      = 280.0      # °C
-PID_DURATION  = 30.0       # s
-LOOP_DT       = 0.03       # s (periodo de control/plot)
+SETPOINT      = 275.0      #°C
+PID_DURATION  = 10.0       #s
+LOOP_DT       = 0.03       #s (periodo de control/plot)
 
 USE_MOUSE_ROI = False
 ROI_X, ROI_Y, ROI_W, ROI_H = 332, -979, 1479, 698
@@ -66,7 +66,7 @@ def get_next_file_number(base_name):
             pass
     return (max(nums) + 1) if nums else 1
 
-base_name   = f"T{int(SETPOINT)}_{int(PID_DURATION)}"  # p.ej. T170_30
+base_name   = f"T{int(SETPOINT)}_{int(PID_DURATION)}s"  # p.ej. T170_30
 file_number = get_next_file_number(base_name)
 log_path    = os.path.join(logs_dir, f"{base_name}_{file_number}.csv")
 
@@ -143,14 +143,14 @@ def main():
                 update_plot(t_now, T, SETPOINT)
                 log_row(T, SETPOINT, pwm)
                 print(f"T={T:6.1f} °C (preheat)", end="\r")
-                if T >= SETPOINT:
+                if T >= SETPOINT-20:
                     break
 
             time.sleep(LOOP_DT)
 
         # ---------- PID ----------
         print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
-        pid = PID(Kp=0.75, Ki=0.78, Kd=0.0, setpoint=SETPOINT)
+        pid = PID(Kp=0.75, Ki=0.75, Kd=0, setpoint=SETPOINT)
         start_pid = time.time()
 
         while (time.time() - start_pid) < PID_DURATION:
