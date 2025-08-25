@@ -27,15 +27,15 @@ MONITOR_INDEX = 2  # Change to 1 or 2
 
 # Fixed ROI (only used if USE_MOUSE = False)
 # Absolute coordinates in virtual desktop space
-ROI_X, ROI_Y, ROI_W, ROI_H = -1591, 115, 1449, 699
+ROI_X, ROI_Y, ROI_W, ROI_H = 332,-979,1479,698 #-1591, 115, 1449, 699
 
-# Run mode: True = continuous loop, False = one-shot capture
+# Run mode: = continuous loop, False = one-shot capture
 RUN_LOOP = False
 FPS = 30.0  # Capture frequency in Hz (only for RUN_LOOP = True)
 
 # Grayscale-to-temperature mapping (linear)
 VMIN, VMAX = 0.0, 255.0
-TMIN, TMAX = 50.0, 300.0
+TMIN, TMAX = 0.0, 350.0
 
 # Tolerance for considering a pixel pure gray (R≈G≈B)
 GRAY_TOL = 12

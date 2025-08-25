@@ -1,243 +1,192 @@
 """
-PID Temperature Control (threaded reader + throttled plot)
+Control de Temperatura: Preheat + PID + Stop (con gráfica en vivo + CSV)
 
-- Temperature is read in a background thread at a fixed cadence (READ_PERIOD).
-- The main loop only consumes the latest value and throttles:
-    * plot updates (PLOT_PERIOD)
-    * console prints (PRINT_PERIOD)
-- Preheat and PID behavior remain the same.
+Fases:
+1) Preheat: PWM = 100% hasta T >= SETPOINT
+2) PID: durante PID_DURATION segundos
+3) Stop: PWM = 0, cerrar gráfica y terminar
+4) Cierre por ventana del plot → también apaga y guarda CSV
 
-Author: NICOLAS MUNOZ
+Autor: Nicolas Muñoz
 """
 
-import time, serial, matplotlib.pyplot as plt, numpy as np, csv, os
+import time
+import os
+import csv
+import serial
+import matplotlib.pyplot as plt
 from collections import deque
-from matplotlib.widgets import TextBox
-from threading import Thread, Event
-from time import perf_counter
 from read_temp2 import select_roi, read_temperature_from_roi
-from datetime import datetime
 
 # ---------------- CONFIG ----------------
-INTERVAL      = 0.1   # main loop pacing (seconds) - small for responsive UI
 PORT          = "COM3"
-SETPOINT0     = 200.0   # °C
+SETPOINT      = 280.0      # °C
+PID_DURATION  = 30.0       # s
+LOOP_DT       = 0.03       # s (periodo de control/plot)
 
 USE_MOUSE_ROI = False
-ROI_X, ROI_Y, ROI_W, ROI_H = -1591, 115, 1449, 699
-
-# Background worker pacing (independent from UI loop)
-READ_PERIOD   = 0.02    # ~50 Hz temperature sampling in the worker thread
-PLOT_PERIOD   = 0.10    # ~10 Hz plot updates
-PRINT_PERIOD  = 0.10    # ~10 Hz console prints
-
-
-# ---------------- FILTER ----------------
-class OutlierFilter:
-    """Simple jump filter to ignore unrealistic spikes."""
-    def __init__(self, max_delta=80):
-        self.prev = None; self.max_delta = max_delta
-    def update(self, v):
-        if self.prev is not None and abs(v - self.prev) > self.max_delta:
-            return self.prev
-        self.prev = v; return v
-
+ROI_X, ROI_Y, ROI_W, ROI_H = 332, -979, 1479, 698
 
 # ---------------- PID ----------------
 class PID:
-    """Basic PID controller with output clamping."""
-    def __init__(self, Kp, Ki, Kd, setpoint, output_limits=(0,255)):
+    """PID básico con salida limitada 0..255."""
+    def __init__(self, Kp, Ki, Kd, setpoint, output_limits=(0, 255)):
         self.Kp, self.Ki, self.Kd = Kp, Ki, Kd
         self.setpoint = setpoint
-        self._last_error = self._integral = 0.0
-        self._last_time  = None
-        self.output_limits = output_limits
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = None
+        self.lo, self.hi = output_limits
+
     def update(self, pv):
         now = time.time()
         e = self.setpoint - pv
-        dt = now - self._last_time if self._last_time else 0.0
-        d = (e - self._last_error)/dt if (self._last_time and dt>0) else 0.0
-        self._integral += e*dt
-        out = self.Kp*e + self.Ki*self._integral + self.Kd*d
-        lo, hi = self.output_limits; out = max(lo, min(hi, out))
-        self._last_error, self._last_time = e, now
-        return int(out), e
+        dt = (now - self.last_time) if self.last_time else 0.0
+        de_dt = (e - self.last_error) / dt if dt > 0 else 0.0
+        self.integral += e * dt
+        u = self.Kp * e + self.Ki * self.integral + self.Kd * de_dt
+        u = max(self.lo, min(self.hi, u))
+        self.last_error, self.last_time = e, now
+        return int(u)
 
+# ---- CSV logging with auto-numbering ----
+logs_dir = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(logs_dir, exist_ok=True)
 
+def get_next_file_number(base_name):
+    existing = [f for f in os.listdir(logs_dir)
+                if f.startswith(base_name) and f.endswith(".csv")]
+    if not existing:
+        return 1
+    nums = []
+    for f in existing:
+        try:
+            nums.append(int(f.split("_")[-1].split(".")[0]))
+        except ValueError:
+            pass
+    return (max(nums) + 1) if nums else 1
+
+base_name   = f"T{int(SETPOINT)}_{int(PID_DURATION)}"  # p.ej. T170_30
+file_number = get_next_file_number(base_name)
+log_path    = os.path.join(logs_dir, f"{base_name}_{file_number}.csv")
+
+csv_file   = open(log_path, "w", newline="", encoding="utf-8")
+csv_writer = csv.writer(csv_file)
+csv_writer.writerow(["time_s", "temp_c", "setpoint_c", "pwm", "error_c"])
+tlog0 = time.time()
+_last_flush = time.time()
+
+# ---------------- MAIN ----------------
 def main():
-    # ---- ROI ----
-    if USE_MOUSE_ROI:
-        x, y, w, h = select_roi()                 # pick live (uses monitor from grayscale config)
-    else:
-        x, y, w, h = ROI_X, ROI_Y, ROI_W, ROI_H   # fixed ROI
+    # ROI
+    roi = select_roi() if USE_MOUSE_ROI else (ROI_X, ROI_Y, ROI_W, ROI_H)
 
-    # ---- PID ----
-    kp, ki, kd = 0.75, 0.78, 0.0
-    pid = PID(kp, ki, kd, SETPOINT0)
-
-    # ---- CSV logging ----
-    logs_dir = os.path.join(os.path.dirname(__file__), "logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    log_path = os.path.join(logs_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_T_control_loop_2.csv")
-    csv_file = open(log_path, "w", newline="", encoding="utf-8")
-    csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["time_s", "temp_c", "setpoint_c", "pwm", "error_c"])
-    tlog0 = time.time()
-    _last_flush = time.time()
-
-    # ---- Arduino ----
+    # Serial
     ser = serial.Serial(PORT, 9600, timeout=1)
     time.sleep(1)
 
-    def fmt_T(t):
-        return f"{t:6.2f} °C" if t is not None else "-- °C"
+    # Plot
+    plt.ion()
+    fig, ax = plt.subplots()
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Temperature (°C)")
+    ax.set_title("Preheat (100%) → PID → Stop")
+    line_temp, = ax.plot([], [], label="Temperature")
+    line_setp, = ax.plot([], [], "r--", label="Setpoint")
+    ax.legend()
 
-    # --------------- Background temperature reader ---------------
-    latest = {"temp": None, "ts": 0.0}
-    stop_evt = Event()
+    t0 = time.time()
+    t_buf = deque(maxlen=4000)
+    T_buf = deque(maxlen=4000)
 
-    def reader_worker():
-        """Reads temperature at a fixed cadence and stores the latest value."""
-        while not stop_evt.is_set():
-            t0 = perf_counter()
-            try:
-                T = read_temperature_from_roi(x, y, w, h)
-                if T is not None:
-                    latest["temp"] = T
-                    latest["ts"]   = time.time()
-            except Exception:
-                # keep running; ignore sporadic read errors
-                pass
-            # keep cadence
-            dt = perf_counter() - t0
-            remain = max(0.0, READ_PERIOD - dt)
-            stop_evt.wait(remain)
+    def update_plot(t_now, T_now, setpoint):
+        t_buf.append(t_now)
+        T_buf.append(T_now)
+        line_temp.set_data(t_buf, T_buf)
+        line_setp.set_data(t_buf, [setpoint] * len(t_buf))
+        ax.set_xlim(0, max(10, t_now + 1))
+        ymin = min(T_buf) - 5 if T_buf else setpoint - 10
+        ymax = max(T_buf) + 5 if T_buf else setpoint + 10
+        ax.set_ylim(ymin, ymax)
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        plt.pause(0.001)
 
-    thr = Thread(target=reader_worker, name="TempReader", daemon=True)
-    thr.start()
-    # -------------------------------------------------------------
+    def log_row(temp, setpoint, pwm):
+        global _last_flush
+        t_el = time.time() - tlog0
+        err = (setpoint - temp) if (temp is not None) else ""
+        csv_writer.writerow([f"{t_el:.4f}",
+                             f"{temp:.4f}" if temp is not None else "",
+                             f"{setpoint:.2f}",
+                             int(pwm),
+                             f"{err:.4f}" if temp is not None else ""])
+        # flush cada ~1s
+        if time.time() - _last_flush >= 1.0:
+            csv_file.flush()
+            _last_flush = time.time()
 
-    # -------- PREHEAT: drive constant PWM until T >= target --------
-    PWM_PREHEAT    = int(1 * 255)   # 100% duty
-    PREHEAT_TARGET = 150.0          # °C
-    print(f"\n[PREHEAT] {PWM_PREHEAT/2.55:.0f}% until T ≥ {PREHEAT_TARGET:.0f} °C...")
-
-    ser.write(bytes([PWM_PREHEAT]))
     try:
+        # ---------- PREHEAT ----------
+        print("[PREHEAT] PWM=100% hasta T >= SETPOINT...")
         while True:
-            temp = latest["temp"]                   # non-blocking read
-            ser.write(bytes([PWM_PREHEAT]))         # keep preheat active
+            if not plt.fignum_exists(fig.number):
+                print("\n[STOP] Ventana cerrada durante preheat.")
+                return
+            T = read_temperature_from_roi(*roi)
+            t_now = time.time() - t0
 
-            if temp is not None:
-                # log preheat sample
-                t_el = time.time() - tlog0
-                err_pre = pid.setpoint - temp
-                csv_writer.writerow([f"{t_el:.4f}", f"{temp:.4f}", f"{pid.setpoint:.2f}", PWM_PREHEAT, f"{err_pre:.4f}"])
-                if time.time() - _last_flush >= 1.0:
-                    csv_file.flush(); _last_flush = time.time()
-                if temp >= PREHEAT_TARGET:
+            pwm = 255  # 100%
+            ser.write(bytes([pwm]))
+
+            if T is not None:
+                update_plot(t_now, T, SETPOINT)
+                log_row(T, SETPOINT, pwm)
+                print(f"T={T:6.1f} °C (preheat)", end="\r")
+                if T >= SETPOINT:
                     break
-            time.sleep(0.0025)
 
-        print("\n[PREHEAT] FINISHED → PID")
+            time.sleep(LOOP_DT)
 
-        # ---- Plot setup ----
-        outlier = OutlierFilter(max_delta=80)
-        plt.ion(); fig, ax = plt.subplots()
-        plt.subplots_adjust(bottom=0.18)
+        # ---------- PID ----------
+        print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
+        pid = PID(Kp=0.75, Ki=0.78, Kd=0.0, setpoint=SETPOINT)
+        start_pid = time.time()
 
-        temps, t_axis = deque(maxlen=400), deque(maxlen=400)  # slightly larger buffer
-        t0 = time.time()
-        lt, = ax.plot([], [], 'b', label='Temperature')
-        ls, = ax.plot([], [], 'r--', label='SETPOINT')
-        ax.set_xlabel("Time (s)"); ax.set_ylabel("°C")
-        ax.set_title("PID control (threaded read, throttled plot)"); ax.legend()
+        while (time.time() - start_pid) < PID_DURATION:
+            if not plt.fignum_exists(fig.number):
+                print("\n[STOP] Ventana cerrada durante PID.")
+                return
+            T = read_temperature_from_roi(*roi)
+            t_now = time.time() - t0
 
-        # ---- Setpoint TextBox ----
-        axbox = plt.axes([0.3, 0.05, 0.15, 0.07])
-        textbox = TextBox(axbox, "Setpoint °C (100-300!)", initial=str(SETPOINT0))
-
-        def submit(text):
-            try:
-                pid.setpoint = float(text)
-                print(f"\n Setpoint changed to {pid.setpoint:.1f} °C")
-            except ValueError:
-                print("\n[WARN] Invalid number.")
-            if t_axis:
-                ls.set_data(t_axis, [pid.setpoint]*len(t_axis))
-                ymin = min(min(temps), pid.setpoint)-2
-                ymax = max(max(temps), pid.setpoint)+2
-                ax.set_ylim(ymin, ymax)
-                fig.canvas.draw_idle()
-        textbox.on_submit(submit)
-
-        # ---- throttling timers ----
-        next_plot  = time.time()
-        next_print = time.time()
-
-        # ---- PID loop ----
-        while plt.fignum_exists(fig.number):
-            now = time.time()
-            t   = now - t0
-
-            # read latest temp (non-blocking)
-            temp = latest["temp"]
-
-            if temp is not None:
-                tf = outlier.update(temp)
-                pwm, err = pid.update(tf)
+            if T is not None:
+                pwm = pid.update(T)
                 ser.write(bytes([pwm]))
+                update_plot(t_now, T, SETPOINT)
+                log_row(T, SETPOINT, pwm)
+                print(f"T={T:6.1f} °C | PWM={pwm:3d}", end="\r")
 
-                # console print (throttled)
-                if now >= next_print:
-                    print(f"\rT={fmt_T(temp)} | e={err:6.2f} °C | PWM={pwm:3d} ({pwm/2.55:3.0f}%)", end="")
-                    next_print = now + PRINT_PERIOD
-
-                # store for plotting
-                temps.append(tf); t_axis.append(t)
-
-                # log control loop sample (filtered temp)
-                t_el = time.time() - tlog0
-                csv_writer.writerow([f"{t_el:.4f}", f"{tf:.4f}", f"{pid.setpoint:.2f}", pwm, f"{err:.4f}"])
-                if time.time() - _last_flush >= 1.0:
-                    csv_file.flush(); _last_flush = time.time()
-            else:
-                if now >= next_print:
-                    print("\rT=  -- °C", end="")
-                    next_print = now + PRINT_PERIOD
-
-            # plot update (throttled)
-            if now >= next_plot and len(t_axis) > 1:
-                lt.set_data(t_axis, temps)
-                ax.set_xlim(max(0, t_axis[0]), t_axis[-1]+1)
-                ymin = min(min(temps), pid.setpoint)-2 if temps else 0
-                ymax = max(max(temps), pid.setpoint)+2 if temps else 10
-                ax.set_ylim(ymin, ymax)
-                ls.set_data(t_axis, [pid.setpoint]*len(t_axis))
-                fig.canvas.draw(); fig.canvas.flush_events()
-                next_plot = now + PLOT_PERIOD
-
-            time.sleep(INTERVAL)
+            time.sleep(LOOP_DT)
 
     except KeyboardInterrupt:
-        print("\nInterrupted.")
+        print("\n[STOP] Interrumpido por usuario.")
+
     finally:
-        # stop worker + safety off
+        # ---------- STOP ----------
         try:
-            ser.write(bytes([0])); print("\nPWM = 0%")
+            ser.write(bytes([0]))
+            ser.close()
         except Exception:
             pass
-        stop_evt.set(); thr.join(timeout=1.0)
-        ser.close()
-
         try:
-            csv_file.flush(); csv_file.close()
-            print(f"Saved CSV: {log_path}")
+            csv_file.flush()
+            csv_file.close()
+            print(f"\n[CSV] Guardado: {log_path}")
         except Exception:
             pass
-
-        plt.ioff(); plt.show()
-
+        plt.close('all')
+        print("\n[FIN] PWM=0%, gráfica cerrada, programa terminado.")
 
 if __name__ == "__main__":
     main()
