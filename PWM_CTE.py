@@ -16,7 +16,7 @@ from collections import deque
 from matplotlib.widgets import TextBox
 from threading import Thread, Event
 from time import perf_counter
-from read_temp import select_roi, read_temperature_from_roi
+from read_temp2 import select_roi, read_temperature_from_roi
 from datetime import datetime
 
 
@@ -24,7 +24,7 @@ from datetime import datetime
 INTERVAL     = 0.01    # UI/plot loop pacing (seconds)
 PORT         = "COM3"  # Arduino serial port
 PWM0         = 20      # Initial PWM (%)
-THRESHOLD_C  = 300.0   # Temperature threshold (°C)
+THRESHOLD_C  = 300.0   # Temperature threshold to measure time until threshold(°C)
 
 # Background worker pacing
 OCR_PERIOD   = 0.08    # ~12.5 Hz OCR updates
@@ -115,7 +115,7 @@ def main():
         """Performs OCR at fixed cadence and stores latest value."""
         while not stop_evt.is_set():
             tstart = perf_counter()
-            tmp = read_temperature_from_roi(x, y, w, h)
+            tmp = read_temperature_from_roi(x, y, w, h) 
             if tmp is not None:
                 latest["temp"] = tmp
                 latest["ts"] = time.time()

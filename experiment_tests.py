@@ -1,9 +1,10 @@
 """
-PID Temperature Control (using grayscale.py via read_temp2)
+Experiment Test: Preheat to setpoint, then PID for user-defined time
 
-Reads temperature from a fixed ROI using the grayscale capture module,
-executes a preheat phase, and then runs a PID control loop driving PWM
-to an Arduino over serial. Logs data to CSV and shows a live plot.
+- Temperature is read in a background thread at a fixed cadence (READ_PERIOD).
+- Preheat phase: PWM at 100% until temperature >= setpoint.
+- PID phase: PID control for a user-defined duration (t seconds).
+- All other logic and structure is preserved from T control loop_pixel.py.
 
 Author: NICOLAS MUNOZ
 """
@@ -11,19 +12,24 @@ Author: NICOLAS MUNOZ
 import time, serial, matplotlib.pyplot as plt, numpy as np, csv, os
 from collections import deque
 from matplotlib.widgets import TextBox
-from read_temp2 import select_roi, read_temperature_from_roi   # <-- uses grayscale.py
+from threading import Thread, Event
+from time import perf_counter
+from read_temp2 import select_roi, read_temperature_from_roi
 from datetime import datetime
 
 # ---------------- CONFIG ----------------
-INTERVAL   = 0.033   # UI loop pacing (s)
-PORT       = "COM3"
-SETPOINT0  = 200.0   # °C
+INTERVAL      = 0.1   # main loop pacing (seconds) - small for responsive UI
+PORT          = "COM3"
+SETPOINT0     = 200.0   # °C
+PID_DURATION  = 5.0    # <--- USER: Set PID duration in seconds here
 
-# Choose ROI source: set to True to pick ROI with the mouse at runtime
 USE_MOUSE_ROI = False
-
-# Fixed ROI (absolute coords in virtual desktop space), used if USE_MOUSE_ROI=False
 ROI_X, ROI_Y, ROI_W, ROI_H = -1591, 115, 1449, 699
+
+# Background worker pacing (independent from UI loop)
+READ_PERIOD   = 0.02    # ~50 Hz temperature sampling in the worker thread
+PLOT_PERIOD   = 0.10    # ~10 Hz plot updates
+PRINT_PERIOD  = 0.10    # ~10 Hz console prints
 
 
 # ---------------- FILTER ----------------
@@ -61,18 +67,18 @@ class PID:
 def main():
     # ---- ROI ----
     if USE_MOUSE_ROI:
-        x, y, w, h = select_roi()                 # pick live on chosen monitor (from grayscale config)
+        x, y, w, h = select_roi()                 # pick live (uses monitor from grayscale config)
     else:
-        x, y, w, h = ROI_X, ROI_Y, ROI_W, ROI_H   # use fixed coordinates
+        x, y, w, h = ROI_X, ROI_Y, ROI_W, ROI_H   # fixed ROI
 
     # ---- PID ----
-    kp, ki, kd = 1.5, 1.8, 0.0
+    kp, ki, kd = 0.75, 0.78, 0.0
     pid = PID(kp, ki, kd, SETPOINT0)
 
     # ---- CSV logging ----
     logs_dir = os.path.join(os.path.dirname(__file__), "logs")
     os.makedirs(logs_dir, exist_ok=True)
-    log_path = os.path.join(logs_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_T_control_loop_2.csv")
+    log_path = os.path.join(logs_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_experiment_tests.csv")
     csv_file = open(log_path, "w", newline="", encoding="utf-8")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["time_s", "temp_c", "setpoint_c", "pwm", "error_c"])
@@ -86,17 +92,39 @@ def main():
     def fmt_T(t):
         return f"{t:6.2f} °C" if t is not None else "-- °C"
 
-    # -------- PREHEAT: drive constant PWM until T >= target --------
-    PWM_PREHEAT    = int(1 * 255)   # 100% duty (keep as-is; comment corrected)
-    PREHEAT_TARGET = 170.0          # °C
+    # --------------- Background temperature reader ---------------
+    latest = {"temp": None, "ts": 0.0}
+    stop_evt = Event()
 
+    def reader_worker():
+        """Reads temperature at a fixed cadence and stores the latest value."""
+        while not stop_evt.is_set():
+            t0 = perf_counter()
+            try:
+                T = read_temperature_from_roi(x, y, w, h)
+                if T is not None:
+                    latest["temp"] = T
+                    latest["ts"]   = time.time()
+            except Exception:
+                pass
+            dt = perf_counter() - t0
+            remain = max(0.0, READ_PERIOD - dt)
+            stop_evt.wait(remain)
+
+    thr = Thread(target=reader_worker, name="TempReader", daemon=True)
+    thr.start()
+    # -------------------------------------------------------------
+
+    # -------- PREHEAT: drive constant PWM until T >= setpoint --------
+    PWM_PREHEAT    = int(1 * 255)   # 100% duty
+    PREHEAT_TARGET = SETPOINT0      # Preheat target is the setpoint
     print(f"\n[PREHEAT] {PWM_PREHEAT/2.55:.0f}% until T ≥ {PREHEAT_TARGET:.0f} °C...")
-    ser.write(bytes([PWM_PREHEAT]))
 
+    ser.write(bytes([PWM_PREHEAT]))
     try:
         while True:
-            temp = read_temperature_from_roi(x, y, w, h)   # <-- from grayscale via adapter
-            ser.write(bytes([PWM_PREHEAT]))                # keep preheat active
+            temp = latest["temp"]                   # non-blocking read
+            ser.write(bytes([PWM_PREHEAT]))         # keep preheat active
 
             if temp is not None:
                 # log preheat sample
@@ -109,18 +137,19 @@ def main():
                     break
             time.sleep(0.0025)
 
-        print("\n[PREHEAT] FINISHED → PID")
+        print("\n[PREHEAT] FINISHED → PID phase for user-defined duration")
 
         # ---- Plot setup ----
         outlier = OutlierFilter(max_delta=80)
         plt.ion(); fig, ax = plt.subplots()
         plt.subplots_adjust(bottom=0.18)
 
-        temps, t_axis = deque(maxlen=200), deque(maxlen=200); t0 = time.time()
+        temps, t_axis = deque(maxlen=400), deque(maxlen=400)  # slightly larger buffer
+        t0 = time.time()
         lt, = ax.plot([], [], 'b', label='Temperature')
         ls, = ax.plot([], [], 'r--', label='SETPOINT')
         ax.set_xlabel("Time (s)"); ax.set_ylabel("°C")
-        ax.set_title("PID control"); ax.legend()
+        ax.set_title("PID control (timed phase)"); ax.legend()
 
         # ---- Setpoint TextBox ----
         axbox = plt.axes([0.3, 0.05, 0.15, 0.07])
@@ -140,32 +169,51 @@ def main():
                 fig.canvas.draw_idle()
         textbox.on_submit(submit)
 
-        # ---- PID loop ----
+        # ---- throttling timers ----
+        next_plot  = time.time()
+        next_print = time.time()
+
+        # ---- PID loop (timed) ----
+        pid_start = time.time()
         while plt.fignum_exists(fig.number):
-            t = time.time()-t0
-            temp = read_temperature_from_roi(x, y, w, h)   # <-- from grayscale via adapter
+            now = time.time()
+            t   = now - t0
+            elapsed = now - pid_start
+            if elapsed > PID_DURATION:
+                print(f"\n[PID] Finished after {PID_DURATION} seconds.")
+                break
+
+            temp = latest["temp"]
+
             if temp is not None:
                 tf = outlier.update(temp)
                 pwm, err = pid.update(tf)
                 ser.write(bytes([pwm]))
-                print(f"\rT={fmt_T(temp)} | e={err:6.2f} °C | PWM={pwm:3d} ({pwm/2.55:3.0f}%)", end="")
+
+                if now >= next_print:
+                    print(f"\rT={fmt_T(temp)} | e={err:6.2f} °C | PWM={pwm:3d} ({pwm/2.55:3.0f}%)", end="")
+                    next_print = now + PRINT_PERIOD
+
                 temps.append(tf); t_axis.append(t)
-                ls.set_data(t_axis, [pid.setpoint]*len(t_axis))
-                # log control loop sample (filtered temp)
+
                 t_el = time.time() - tlog0
                 csv_writer.writerow([f"{t_el:.4f}", f"{tf:.4f}", f"{pid.setpoint:.2f}", pwm, f"{err:.4f}"])
                 if time.time() - _last_flush >= 1.0:
                     csv_file.flush(); _last_flush = time.time()
             else:
-                print("\rT=  -- °C", end="")
+                if now >= next_print:
+                    print("\rT=  -- °C", end="")
+                    next_print = now + PRINT_PERIOD
 
-            if len(t_axis) > 1:
+            if now >= next_plot and len(t_axis) > 1:
                 lt.set_data(t_axis, temps)
                 ax.set_xlim(max(0, t_axis[0]), t_axis[-1]+1)
-                ymin = min(min(temps), pid.setpoint)-2
-                ymax = max(max(temps), pid.setpoint)+2
+                ymin = min(min(temps), pid.setpoint)-2 if temps else 0
+                ymax = max(max(temps), pid.setpoint)+2 if temps else 10
                 ax.set_ylim(ymin, ymax)
+                ls.set_data(t_axis, [pid.setpoint]*len(t_axis))
                 fig.canvas.draw(); fig.canvas.flush_events()
+                next_plot = now + PLOT_PERIOD
 
             time.sleep(INTERVAL)
 
@@ -176,12 +224,15 @@ def main():
             ser.write(bytes([0])); print("\nPWM = 0%")
         except Exception:
             pass
+        stop_evt.set(); thr.join(timeout=1.0)
         ser.close()
+
         try:
             csv_file.flush(); csv_file.close()
             print(f"Saved CSV: {log_path}")
         except Exception:
             pass
+
         plt.ioff(); plt.show()
 
 

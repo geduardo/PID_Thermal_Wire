@@ -35,7 +35,7 @@ FPS = 30.0  # Capture frequency in Hz (only for RUN_LOOP = True)
 
 # Grayscale-to-temperature mapping (linear)
 VMIN, VMAX = 0.0, 255.0
-TMIN, TMAX = 0.0, 300.0
+TMIN, TMAX = 50.0, 300.0
 
 # Tolerance for considering a pixel pure gray (R≈G≈B)
 GRAY_TOL = 12
