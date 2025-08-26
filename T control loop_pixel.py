@@ -20,7 +20,7 @@ from read_temp2 import select_roi, read_temperature_from_roi
 
 # ---------------- CONFIG ----------------
 PORT          = "COM3"
-SETPOINT      = 275.0      #°C
+SETPOINT      = 280.0      #°C
 PID_DURATION  = 10.0       #s
 LOOP_DT       = 0.03       #s (periodo de control/plot)
 
@@ -150,7 +150,7 @@ def main():
 
         # ---------- PID ----------
         print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
-        pid = PID(Kp=0.75, Ki=0.75, Kd=0, setpoint=SETPOINT)
+        pid = PID(Kp=0.7, Ki=0.2, Kd=0, setpoint=SETPOINT)
         start_pid = time.time()
 
         while (time.time() - start_pid) < PID_DURATION:
