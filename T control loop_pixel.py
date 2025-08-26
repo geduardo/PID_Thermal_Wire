@@ -13,11 +13,11 @@ from read_temp2 import select_roi, read_temperature_from_roi
 # ---------------- CONFIG ----------------
 PORT          = "COM3"
 SETPOINT      = 300.0      # °C
-PID_DURATION  = 3.0       # s
+PID_DURATION  = 6.0       # s
 LOOP_DT       = 0.01       # s (periodo de control/plot)
 
 USE_MOUSE_ROI = False
-ROI_X, ROI_Y, ROI_W, ROI_H = 332, -979, 1479, 698
+ROI_X, ROI_Y, ROI_W, ROI_H = 1065,-806,135,245#332, -979, 1479, 698
 
 # ---------------- PID ----------------
 class PID:
@@ -58,7 +58,7 @@ def get_next_file_number(base_name):
             pass
     return (max(nums) + 1) if nums else 1
 
-base_name   = f"T{int(SETPOINT)}_{int(PID_DURATION)}s"  # p.ej. T170_30
+base_name   = f"T{int(SETPOINT)}_{int(PID_DURATION)}s"
 file_number = get_next_file_number(base_name)
 log_path    = os.path.join(logs_dir, f"{base_name}_{file_number}.csv")
 
@@ -143,7 +143,7 @@ def main():
         """""
         # ---------- PID ----------
         print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
-        pid = PID(Kp=0.274, Ki=0.3, Kd=0, setpoint=SETPOINT)
+        pid = PID(Kp=0.279, Ki=0.4, Kd=0, setpoint=SETPOINT)
         start_pid = time.time()
 
         while (time.time() - start_pid) < PID_DURATION:

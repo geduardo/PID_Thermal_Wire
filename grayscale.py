@@ -27,7 +27,7 @@ MONITOR_INDEX = 2  # Change to 1 or 2
 
 # Fixed ROI (only used if USE_MOUSE = False)
 # Absolute coordinates in virtual desktop space
-ROI_X, ROI_Y, ROI_W, ROI_H = 332,-979,1479,698 #-1591, 115, 1449, 699
+ROI_X, ROI_Y, ROI_W, ROI_H =1065,-806,135,245 #  332,-979,1479,698 #-1591, 115, 1449, 699
 
 # Run mode: = continuous loop, False = one-shot capture
 RUN_LOOP = False
