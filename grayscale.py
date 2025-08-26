@@ -27,7 +27,7 @@ MONITOR_INDEX = 2  # Change to 1 or 2
 
 # Fixed ROI (only used if USE_MOUSE = False)
 # Absolute coordinates in virtual desktop space
-ROI_X, ROI_Y, ROI_W, ROI_H = 332,-979,1479,698 #-1591, 115, 1449, 699
+ROI_X, ROI_Y, ROI_W, ROI_H = 332, -979, 1479, 698  # -1591, 115, 1449, 699
 
 # Run mode: = continuous loop, False = one-shot capture
 RUN_LOOP = False
@@ -43,10 +43,13 @@ GRAY_TOL = 12
 
 
 # -------------------- Screen Capture Helpers --------------------
+# Reuse single mss instance to avoid creation overhead per frame
+_sct = mss.mss()
+
+
 def _mss_region(x: int, y: int, w: int, h: int) -> np.ndarray:
     """Capture an absolute region (x, y, w, h) and return as BGR image."""
-    with mss.mss() as sct:
-        raw = np.array(sct.grab({"left": x, "top": y, "width": w, "height": h}))
+    raw = np.array(_sct.grab({"left": x, "top": y, "width": w, "height": h}))
     return raw[..., :3]  # Remove alpha channel
 
 
@@ -106,7 +109,7 @@ def find_max_pixel_and_coord(bgr_img: np.ndarray):
 def linmap(value: float, vmin: float, vmax: float, tmin: float, tmax: float) -> float:
     """Map value linearly from range [vmin, vmax] to [tmin, tmax]."""
     if vmax == vmin:
-        return float('nan')
+        return float("nan")
     alpha = np.clip((value - vmin) / (vmax - vmin), 0.0, 1.0)
     return tmin + alpha * (tmax - tmin)
 
@@ -121,27 +124,45 @@ def show_popup(roi_bgr, max_val, max_xy, t_value, vmin, vmax, tmin, tmax):
 
     # ROI with marker
     ax_img = fig.add_subplot(gs[0, 0])
-    ax_img.imshow(roi_rgb, origin='upper')
-    ax_img.scatter([mx], [my], s=120, facecolors='none', edgecolors='red', linewidths=2)
+    ax_img.imshow(roi_rgb, origin="upper")
+    ax_img.scatter([mx], [my], s=120, facecolors="none", edgecolors="red", linewidths=2)
     ax_img.set_title("ROI (max pixel marked)")
-    ax_img.set_xticks([]); ax_img.set_yticks([])
-    info = f"Max: {max_val} (x={mx}, y={my})\nT={t_value:.2f} °C\n" \
-           f"Map: [{vmin},{vmax}] → [{tmin}°C,{tmax}°C]"
-    ax_img.text(0.02, 0.98, info, transform=ax_img.transAxes,
-                va='top', ha='left', fontsize=9,
-                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=6))
+    ax_img.set_xticks([])
+    ax_img.set_yticks([])
+    info = (
+        f"Max: {max_val} (x={mx}, y={my})\nT={t_value:.2f} °C\n"
+        f"Map: [{vmin},{vmax}] → [{tmin}°C,{tmax}°C]"
+    )
+    ax_img.text(
+        0.02,
+        0.98,
+        info,
+        transform=ax_img.transAxes,
+        va="top",
+        ha="left",
+        fontsize=9,
+        bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=6),
+    )
 
     # Grayscale bar
     ax_bar = fig.add_subplot(gs[0, 1])
     grad = np.linspace(0, 255, 256, dtype=np.uint8)[:, None]
     grad_img = np.repeat(grad, 40, axis=1)
-    ax_bar.imshow(grad_img, cmap='gray', vmin=0, vmax=255,
-                  extent=[0, 1, 0, 255], aspect='auto', origin='lower')
+    ax_bar.imshow(
+        grad_img,
+        cmap="gray",
+        vmin=0,
+        vmax=255,
+        extent=[0, 1, 0, 255],
+        aspect="auto",
+        origin="lower",
+    )
     ax_bar.set_title("Scale (0–255)")
-    ax_bar.set_xlim(0, 1); ax_bar.set_xticks([])
+    ax_bar.set_xlim(0, 1)
+    ax_bar.set_xticks([])
     ax_bar.set_ylabel("Gray level")
     ax_bar.set_yticks([0, 64, 128, 192, 255])
-    ax_bar.axhline(int(np.clip(max_val, 0, 255)), linestyle='--', linewidth=2)
+    ax_bar.axhline(int(np.clip(max_val, 0, 255)), linestyle="--", linewidth=2)
 
     plt.tight_layout()
     plt.show()
@@ -171,7 +192,9 @@ def loop_mode(roi_abs):
             roi_bgr = _mss_region(x, y, w, h)
             max_val, (mx, my), _ = find_max_pixel_and_coord(roi_bgr)
             T = linmap(max_val, VMIN, VMAX, TMIN, TMAX)
-            print(f"T={T:.2f}°C  max={max_val}  pos=({mx},{my})   ", end="\r", flush=True)
+            print(
+                f"T={T:.2f}°C  max={max_val}  pos=({mx},{my})   ", end="\r", flush=True
+            )
             sleep_time = period - (time.time() - t0)
             if sleep_time > 0:
                 time.sleep(sleep_time)
@@ -187,12 +210,20 @@ def main():
     print(f"[mss] Detected monitors: {len(mons)-1}")
     for i in range(1, len(mons)):
         m = mons[i]
-        print(f"  Monitor {i}: left={m['left']} top={m['top']} "
-              f"width={m['width']} height={m['height']}")
+        print(
+            f"  Monitor {i}: left={m['left']} top={m['top']} "
+            f"width={m['width']} height={m['height']}"
+        )
 
     # Get ROI based on configuration
-    roi_abs = _select_roi_on_monitor(MONITOR_INDEX) if USE_MOUSE else (ROI_X, ROI_Y, ROI_W, ROI_H)
-    print(f"[CONFIG] USE_MOUSE={USE_MOUSE}  MONITOR_INDEX={MONITOR_INDEX}  RUN_LOOP={RUN_LOOP}  FPS={FPS}")
+    roi_abs = (
+        _select_roi_on_monitor(MONITOR_INDEX)
+        if USE_MOUSE
+        else (ROI_X, ROI_Y, ROI_W, ROI_H)
+    )
+    print(
+        f"[CONFIG] USE_MOUSE={USE_MOUSE}  MONITOR_INDEX={MONITOR_INDEX}  RUN_LOOP={RUN_LOOP}  FPS={FPS}"
+    )
     print(f"[ROI abs] x={roi_abs[0]} y={roi_abs[1]} w={roi_abs[2]} h={roi_abs[3]}")
 
     # Run in selected mode

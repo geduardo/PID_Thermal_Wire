@@ -9,19 +9,23 @@ import serial
 import matplotlib.pyplot as plt
 from collections import deque
 from read_temp2 import select_roi, read_temperature_from_roi
+import cv2
+import numpy as np
 
 # ---------------- CONFIG ----------------
-PORT          = "COM3"
-SETPOINT      = 300.0      # °C
-PID_DURATION  = 3.0       # s
-LOOP_DT       = 0.01       # s (periodo de control/plot)
+PORT = "COM3"
+SETPOINT = 300.0  # °C
+PID_DURATION = 3.0  # s
+LOOP_DT = 0.01  # s (periodo de control/plot)
 
 USE_MOUSE_ROI = False
 ROI_X, ROI_Y, ROI_W, ROI_H = 332, -979, 1479, 698
 
+
 # ---------------- PID ----------------
 class PID:
     """PID básico con salida limitada 0..255."""
+
     def __init__(self, Kp, Ki, Kd, setpoint, output_limits=(0, 255)):
         self.Kp, self.Ki, self.Kd = Kp, Ki, Kd
         self.setpoint = setpoint
@@ -41,13 +45,18 @@ class PID:
         self.last_error, self.last_time = e, now
         return int(u)
 
+
 # ---- CSV logging with auto-numbering ----
 logs_dir = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(logs_dir, exist_ok=True)
 
+
 def get_next_file_number(base_name):
-    existing = [f for f in os.listdir(logs_dir)
-                if f.startswith(base_name) and f.endswith(".csv")]
+    existing = [
+        f
+        for f in os.listdir(logs_dir)
+        if f.startswith(base_name) and f.endswith(".csv")
+    ]
     if not existing:
         return 1
     nums = []
@@ -58,15 +67,17 @@ def get_next_file_number(base_name):
             pass
     return (max(nums) + 1) if nums else 1
 
-base_name   = f"T{int(SETPOINT)}_{int(PID_DURATION)}s"  # p.ej. T170_30
-file_number = get_next_file_number(base_name)
-log_path    = os.path.join(logs_dir, f"{base_name}_{file_number}.csv")
 
-csv_file   = open(log_path, "w", newline="", encoding="utf-8")
+base_name = f"T{int(SETPOINT)}_{int(PID_DURATION)}s"  # p.ej. T170_30
+file_number = get_next_file_number(base_name)
+log_path = os.path.join(logs_dir, f"{base_name}_{file_number}.csv")
+
+csv_file = open(log_path, "w", newline="", encoding="utf-8")
 csv_writer = csv.writer(csv_file)
 csv_writer.writerow(["time_s", "temp_c", "setpoint_c", "pwm", "error_c"])
 tlog0 = time.time()
 _last_flush = time.time()
+
 
 # ---------------- MAIN ----------------
 def main():
@@ -83,13 +94,25 @@ def main():
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Temperature (°C)")
     ax.set_title("Preheat (100%) → PID → Stop")
-    line_temp, = ax.plot([], [], label="Temperature")
-    line_setp, = ax.plot([], [], "r--", label="Setpoint")
+    (line_temp,) = ax.plot([], [], label="Temperature")
+    (line_setp,) = ax.plot([], [], "r--", label="Setpoint")
     ax.legend()
 
     t0 = time.time()
     t_buf = deque(maxlen=4000)
     T_buf = deque(maxlen=4000)
+
+    # Plot throttling variables
+    last_plot_time = 0.0
+    PLOT_UPDATE_DT = 0.1  # Update plot at 10 Hz max
+
+    # Console print throttling
+    last_print_time = 0.0
+    PRINT_UPDATE_DT = 0.2  # Print at 5 Hz max
+
+    # ROI change detection to skip processing when nothing changed
+    prev_roi_signature = None
+    CHANGE_THRESHOLD = 1.0  # Sensitivity for detecting ROI changes
 
     def update_plot(t_now, T_now, setpoint):
         t_buf.append(t_now)
@@ -104,15 +127,51 @@ def main():
         fig.canvas.flush_events()
         plt.pause(0.001)
 
+    def check_roi_changed(roi_coords):
+        """Fast ROI change detection using downsampled signature"""
+        nonlocal prev_roi_signature
+        try:
+            # Import grayscale module for direct capture
+            import grayscale as cap
+
+            # Quick capture of ROI
+            roi_bgr = cap._mss_region(*roi_coords)
+
+            # Create a fast signature: downsample and compute mean grayscale
+            small = cv2.resize(roi_bgr, (16, 16))  # Very small for speed
+            gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            signature = float(gray_small.mean())
+
+            # Check if changed significantly
+            if prev_roi_signature is None:
+                prev_roi_signature = signature
+                return True  # First frame, consider it changed
+
+            change_magnitude = abs(signature - prev_roi_signature)
+            if change_magnitude > CHANGE_THRESHOLD:
+                # Exponential smoothing to reduce noise
+                prev_roi_signature = 0.8 * prev_roi_signature + 0.2 * signature
+                return True
+            else:
+                return False
+
+        except Exception:
+            # If anything fails, assume changed to be safe
+            return True
+
     def log_row(temp, setpoint, pwm):
         global _last_flush
         t_el = time.time() - tlog0
         err = (setpoint - temp) if (temp is not None) else ""
-        csv_writer.writerow([f"{t_el:.4f}",
-                             f"{temp:.4f}" if temp is not None else "",
-                             f"{setpoint:.2f}",
-                             int(pwm),
-                             f"{err:.4f}" if temp is not None else ""])
+        csv_writer.writerow(
+            [
+                f"{t_el:.4f}",
+                f"{temp:.4f}" if temp is not None else "",
+                f"{setpoint:.2f}",
+                int(pwm),
+                f"{err:.4f}" if temp is not None else "",
+            ]
+        )
         # flush cada ~1s
         if time.time() - _last_flush >= 1.0:
             csv_file.flush()
@@ -140,7 +199,7 @@ def main():
                     break  # ahora el PID_DURATION empieza aquí
 
             time.sleep(LOOP_DT)
-        """""
+        """ ""
         # ---------- PID ----------
         print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
         pid = PID(Kp=0.274, Ki=0.3, Kd=0, setpoint=SETPOINT)
@@ -150,15 +209,33 @@ def main():
             if not plt.fignum_exists(fig.number):
                 print("\n[STOP] Ventana cerrada durante PID.")
                 return
-            T = read_temperature_from_roi(*roi)
-            t_now = time.time() - t0
 
-            if T is not None:
-                pwm = pid.update(T)
-                ser.write(bytes([pwm]))
-                update_plot(t_now, T, SETPOINT)
-                log_row(T, SETPOINT, pwm)
-                print(f"T={T:6.1f} °C | PWM={pwm:3d}", end="\r")
+            # Check if ROI content changed before doing expensive processing
+            roi_changed = check_roi_changed(roi)
+
+            if roi_changed:
+                T = read_temperature_from_roi(*roi)
+                t_now = time.time() - t0
+
+                if T is not None:
+                    pwm = pid.update(T)
+                    ser.write(bytes([pwm]))
+                    log_row(T, SETPOINT, pwm)
+
+                    # Throttled plot update
+                    if (time.time() - last_plot_time) >= PLOT_UPDATE_DT:
+                        update_plot(t_now, T, SETPOINT)
+                        last_plot_time = time.time()
+
+                    # Throttled console print
+                    if (time.time() - last_print_time) >= PRINT_UPDATE_DT:
+                        print(f"T={T:6.1f} °C | PWM={pwm:3d}", end="\r")
+                        last_print_time = time.time()
+            else:
+                # ROI unchanged, just maintain current PWM and minimal processing
+                # Still need to send PWM to keep Arduino happy
+                if "pwm" in locals():
+                    ser.write(bytes([pwm]))
 
             time.sleep(LOOP_DT)
 
@@ -178,9 +255,17 @@ def main():
             T = read_temperature_from_roi(*roi)
             t_now = time.time() - t0
             if T is not None:
-                update_plot(t_now, T, SETPOINT)
                 log_row(T, SETPOINT, 0)
-                print(f"T={T:6.1f} °C | PWM=  0", end="\r")
+
+                # Throttled plot update during stop phase
+                if (time.time() - last_plot_time) >= PLOT_UPDATE_DT:
+                    update_plot(t_now, T, SETPOINT)
+                    last_plot_time = time.time()
+
+                # Throttled console print during stop phase
+                if (time.time() - last_print_time) >= PRINT_UPDATE_DT:
+                    print(f"T={T:6.1f} °C | PWM=  0", end="\r")
+                    last_print_time = time.time()
             time.sleep(LOOP_DT)
 
     except KeyboardInterrupt:
@@ -198,8 +283,19 @@ def main():
             print(f"\n[CSV] Guardado: {log_path}")
         except Exception:
             pass
-        plt.close('all')
+
+        # Clean up mss instance
+        try:
+            import grayscale as cap
+
+            if hasattr(cap, "_sct"):
+                cap._sct.close()
+        except Exception:
+            pass
+
+        plt.close("all")
         print("\n[FIN] PWM=0%, gráfica cerrada, programa terminado.")
+
 
 if __name__ == "__main__":
     main()
