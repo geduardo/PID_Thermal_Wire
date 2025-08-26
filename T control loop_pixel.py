@@ -11,17 +11,21 @@ from collections import deque
 from read_temp2 import select_roi, read_temperature_from_roi
 
 # ---------------- CONFIG ----------------
-PORT          = "COM3"
-SETPOINT      = 300.0      # °C
-PID_DURATION  = 6.0       # s
-LOOP_DT       = 0.01       # s (periodo de control/plot)
+
+PORT = "COM3"
+SETPOINT = 300.0  # °C
+PID_DURATION = 3.0  # s
+LOOP_DT = 0.01  # s (periodo de control/plot)
+PREHEAT_TEMP = 150.0  # °C (objetivo de pre-calentamiento con PWM máx.)
 
 USE_MOUSE_ROI = False
 ROI_X, ROI_Y, ROI_W, ROI_H = 1065,-806,135,245#332, -979, 1479, 698
 
+
 # ---------------- PID ----------------
 class PID:
     """PID básico con salida limitada 0..255."""
+
     def __init__(self, Kp, Ki, Kd, setpoint, output_limits=(0, 255)):
         self.Kp, self.Ki, self.Kd = Kp, Ki, Kd
         self.setpoint = setpoint
@@ -41,13 +45,38 @@ class PID:
         self.last_error, self.last_time = e, now
         return int(u)
 
+    def preload_integral(self, pv, manual_output):
+        """
+        Bumpless transfer: initialize the integral term so that the controller
+        output starts near the last manual output when switching from preheat.
+        """
+        # Guard against missing measurement
+        if pv is None:
+            self.integral = 0.0
+            self.last_error = 0.0
+            self.last_time = time.time()
+            return
+        error = self.setpoint - pv
+        self.last_error = error
+        self.last_time = time.time()
+        if self.Ki == 0:
+            self.integral = 0.0
+            return
+        target_u = float(max(self.lo, min(self.hi, manual_output)))
+        self.integral = (target_u - self.Kp * error) / self.Ki
+
+
 # ---- CSV logging with auto-numbering ----
 logs_dir = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(logs_dir, exist_ok=True)
 
+
 def get_next_file_number(base_name):
-    existing = [f for f in os.listdir(logs_dir)
-                if f.startswith(base_name) and f.endswith(".csv")]
+    existing = [
+        f
+        for f in os.listdir(logs_dir)
+        if f.startswith(base_name) and f.endswith(".csv")
+    ]
     if not existing:
         return 1
     nums = []
@@ -58,15 +87,17 @@ def get_next_file_number(base_name):
             pass
     return (max(nums) + 1) if nums else 1
 
-base_name   = f"T{int(SETPOINT)}_{int(PID_DURATION)}s"
-file_number = get_next_file_number(base_name)
-log_path    = os.path.join(logs_dir, f"{base_name}_{file_number}.csv")
 
-csv_file   = open(log_path, "w", newline="", encoding="utf-8")
+base_name = f"T{int(SETPOINT)}_{int(PID_DURATION)}s"  # p.ej. T170_30
+file_number = get_next_file_number(base_name)
+log_path = os.path.join(logs_dir, f"{base_name}_{file_number}.csv")
+
+csv_file = open(log_path, "w", newline="", encoding="utf-8")
 csv_writer = csv.writer(csv_file)
 csv_writer.writerow(["time_s", "temp_c", "setpoint_c", "pwm", "error_c"])
 tlog0 = time.time()
 _last_flush = time.time()
+
 
 # ---------------- MAIN ----------------
 def main():
@@ -83,8 +114,8 @@ def main():
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Temperature (°C)")
     ax.set_title("Preheat (100%) → PID → Stop")
-    line_temp, = ax.plot([], [], label="Temperature")
-    line_setp, = ax.plot([], [], "r--", label="Setpoint")
+    (line_temp,) = ax.plot([], [], label="Temperature")
+    (line_setp,) = ax.plot([], [], "r--", label="Setpoint")
     ax.legend()
 
     t0 = time.time()
@@ -108,11 +139,15 @@ def main():
         global _last_flush
         t_el = time.time() - tlog0
         err = (setpoint - temp) if (temp is not None) else ""
-        csv_writer.writerow([f"{t_el:.4f}",
-                             f"{temp:.4f}" if temp is not None else "",
-                             f"{setpoint:.2f}",
-                             int(pwm),
-                             f"{err:.4f}" if temp is not None else ""])
+        csv_writer.writerow(
+            [
+                f"{t_el:.4f}",
+                f"{temp:.4f}" if temp is not None else "",
+                f"{setpoint:.2f}",
+                int(pwm),
+                f"{err:.4f}" if temp is not None else "",
+            ]
+        )
         # flush cada ~1s
         if time.time() - _last_flush >= 1.0:
             csv_file.flush()
@@ -120,8 +155,9 @@ def main():
 
     try:
         # ---------- PREHEAT ----------
-        """""
-        print("[PREHEAT] PWM=100% hasta T >= SETPOINT...")
+        T_preheat_end = None
+        last_manual_pwm = 0
+        print(f"[PREHEAT] PWM=100% hasta T >= {PREHEAT_TEMP:.1f} °C...")
         while True:
             if not plt.fignum_exists(fig.number):
                 print("\n[STOP] Ventana cerrada durante preheat.")
@@ -136,14 +172,18 @@ def main():
                 update_plot(t_now, T, SETPOINT)
                 log_row(T, SETPOINT, pwm)
                 print(f"T={T:6.1f} °C (preheat)", end="\r")
-                if T >= SETPOINT:
+                if T >= PREHEAT_TEMP:
+                    T_preheat_end = T
+                    last_manual_pwm = pwm
                     break  # ahora el PID_DURATION empieza aquí
 
             time.sleep(LOOP_DT)
-        """""
         # ---------- PID ----------
         print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
-        pid = PID(Kp=0.279, Ki=0.4, Kd=0, setpoint=SETPOINT)
+
+        pid = PID(Kp=0.274, Ki=0.3, Kd=0, setpoint=SETPOINT)
+        # Bumpless transfer: preload integral with last manual output
+        pid.preload_integral(T_preheat_end, last_manual_pwm)
         start_pid = time.time()
 
         while (time.time() - start_pid) < PID_DURATION:
@@ -198,8 +238,9 @@ def main():
             print(f"\n[CSV] Guardado: {log_path}")
         except Exception:
             pass
-        plt.close('all')
+        plt.close("all")
         print("\n[FIN] PWM=0%, gráfica cerrada, programa terminado.")
+
 
 if __name__ == "__main__":
     main()
