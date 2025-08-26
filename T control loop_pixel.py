@@ -1,12 +1,4 @@
 """
-Control de Temperatura: Preheat + PID + Stop (con gráfica en vivo + CSV)
-
-Fases:
-1) Preheat: PWM = 100% hasta T >= SETPOINT
-2) PID: durante PID_DURATION segundos
-3) Stop: PWM = 0, cerrar gráfica y terminar
-4) Cierre por ventana del plot → también apaga y guarda CSV
-
 Autor: Nicolas Muñoz
 """
 
@@ -20,9 +12,9 @@ from read_temp2 import select_roi, read_temperature_from_roi
 
 # ---------------- CONFIG ----------------
 PORT          = "COM3"
-SETPOINT      = 280.0      #°C
-PID_DURATION  = 10.0       #s
-LOOP_DT       = 0.03       #s (periodo de control/plot)
+SETPOINT      = 300.0      # °C
+PID_DURATION  = 3.0       # s
+LOOP_DT       = 0.01       # s (periodo de control/plot)
 
 USE_MOUSE_ROI = False
 ROI_X, ROI_Y, ROI_W, ROI_H = 332, -979, 1479, 698
@@ -83,7 +75,7 @@ def main():
 
     # Serial
     ser = serial.Serial(PORT, 9600, timeout=1)
-    time.sleep(1)
+    time.sleep(0.5)
 
     # Plot
     plt.ion()
@@ -128,6 +120,7 @@ def main():
 
     try:
         # ---------- PREHEAT ----------
+        """""
         print("[PREHEAT] PWM=100% hasta T >= SETPOINT...")
         while True:
             if not plt.fignum_exists(fig.number):
@@ -143,14 +136,14 @@ def main():
                 update_plot(t_now, T, SETPOINT)
                 log_row(T, SETPOINT, pwm)
                 print(f"T={T:6.1f} °C (preheat)", end="\r")
-                if T >= SETPOINT-20:
-                    break
+                if T >= SETPOINT:
+                    break  # ahora el PID_DURATION empieza aquí
 
             time.sleep(LOOP_DT)
-
+        """""
         # ---------- PID ----------
         print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
-        pid = PID(Kp=0.7, Ki=0.2, Kd=0, setpoint=SETPOINT)
+        pid = PID(Kp=0.274, Ki=0.3, Kd=0, setpoint=SETPOINT)
         start_pid = time.time()
 
         while (time.time() - start_pid) < PID_DURATION:
@@ -169,11 +162,31 @@ def main():
 
             time.sleep(LOOP_DT)
 
+        # ---------- STOP (PWM=0, mantener 2s gráfica) ----------
+        print("\n[STOP] Fin PID → PWM=0, mostrando gráfica 2s más...")
+        try:
+            ser.write(bytes([0]))
+            ser.close()
+        except Exception:
+            pass
+
+        # Mantener gráfica 2 segundos mostrando caída de temperatura
+        stop_start = time.time()
+        while time.time() - stop_start < 2.0:
+            if not plt.fignum_exists(fig.number):
+                break
+            T = read_temperature_from_roi(*roi)
+            t_now = time.time() - t0
+            if T is not None:
+                update_plot(t_now, T, SETPOINT)
+                log_row(T, SETPOINT, 0)
+                print(f"T={T:6.1f} °C | PWM=  0", end="\r")
+            time.sleep(LOOP_DT)
+
     except KeyboardInterrupt:
         print("\n[STOP] Interrumpido por usuario.")
 
     finally:
-        # ---------- STOP ----------
         try:
             ser.write(bytes([0]))
             ser.close()
