@@ -143,7 +143,7 @@ def main():
         """""
         # ---------- PID ----------
         print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
-        pid = PID(Kp=0.274, Ki=0.3, Kd=0, setpoint=SETPOINT)
+        pid = PID(Kp=0.52, Ki=0.42, Kd=0.029, setpoint=SETPOINT)
         start_pid = time.time()
 
         while (time.time() - start_pid) < PID_DURATION:
