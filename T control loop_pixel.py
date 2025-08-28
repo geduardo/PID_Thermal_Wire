@@ -12,8 +12,8 @@ from read_temp2 import select_roi, read_temperature_from_roi
 
 # ---------------- CONFIG ----------------
 PORT          = "COM3"
-SETPOINT      = 300.0      # °C
-PID_DURATION  = 3.0       # s
+SETPOINT      = 50.0      # °C
+PID_DURATION  = 10000.0       # s
 LOOP_DT       = 0.01       # s (periodo de control/plot)
 
 USE_MOUSE_ROI = False
@@ -130,7 +130,7 @@ def main():
             t_now = time.time() - t0
 
             pwm = 255  # 100%
-            ser.write(bytes([pwm]))
+            ser.write(bytes([pwm]))4
 
             if T is not None:
                 update_plot(t_now, T, SETPOINT)
@@ -143,7 +143,8 @@ def main():
         """""
         # ---------- PID ----------
         print("\n[PID] Ejecutando durante %.1f s..." % PID_DURATION)
-        pid = PID(Kp=0.52, Ki=0.42, Kd=0.029, setpoint=SETPOINT)
+        pid = PID(Kp=0.24, Ki=0.33, Kd=0.012, setpoint=SETPOINT)
+        #pid = PID(Kp=0, Ki=0, Kd=0, setpoint=SETPOINT)
         start_pid = time.time()
 
         while (time.time() - start_pid) < PID_DURATION:
