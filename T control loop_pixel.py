@@ -12,9 +12,9 @@ from read_temp2 import select_roi, read_temperature_from_roi
 
 # ---------------- CONFIG ----------------
 PORT          = "COM3"
-SETPOINT      = 50.0      # °C
-PID_DURATION  = 10000.0       # s
-LOOP_DT       = 0.01       # s (periodo de control/plot)
+SETPOINT      = 300.0      # °C
+PID_DURATION  = 30.0       #s
+LOOP_DT       = 0.01       #s (periodo de control/plot)
 
 USE_MOUSE_ROI = False
 ROI_X, ROI_Y, ROI_W, ROI_H = 332, -979, 1479, 698

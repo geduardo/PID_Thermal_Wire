@@ -23,7 +23,7 @@ from datetime import datetime
 # ---------------- CONFIGURATION ----------------
 INTERVAL     = 0.01    # UI/plot loop pacing (seconds)
 PORT         = "COM3"  # Arduino serial port
-PWM0         = 0      # Initial PWM (%)
+PWM0         = 0     # Initial PWM (%)
 THRESHOLD_C  = 300.0   # Temperature threshold to measure time until threshold(°C)
 
 # Background worker pacing
